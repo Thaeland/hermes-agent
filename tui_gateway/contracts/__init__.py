@@ -8,6 +8,7 @@ from . import (  # noqa: F401
     connectors,
     connectors_operation,
     events,
+    filing_organization_assets,
     groups_bot_relay,
     liveness,
     profiles_vault_complete_foreign_subagents,
