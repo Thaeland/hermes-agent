@@ -396,6 +396,46 @@ def test_scoped_session_ids_is_union_of_placed_sessions():
     assert _home_session_ids(tree) == [homeless["id"]]
 
 
+def test_session_projects_maps_every_scoped_id_to_its_owner():
+    project = _project("p_app", "App", ["/www/app"])
+    resolve = _resolver(
+        {
+            "/www/app": ("/www/app", "/www/app"),
+            "/www/repo": ("/www/repo", "/www/repo"),
+        }
+    )
+    owned = _session("/www/app", branch="main")
+    auto = _session("/www/repo", branch="main")
+    homeless = _session(None)  # no cwd -> the Home bucket
+
+    tree = pt.build_tree([project], [owned, auto, homeless], [], resolve, hydrate=True)
+
+    assert tree["session_projects"] == {
+        owned["id"]: "p_app",
+        auto["id"]: "/www/repo",
+        homeless["id"]: pt.NO_PROJECT_ID,
+    }
+    # The map's domain is exactly the scoped set — every claimed id names an owner.
+    assert set(tree["session_projects"]) == set(tree["scoped_session_ids"])
+
+
+def test_session_projects_is_not_limited_by_the_preview_window():
+    # The bug this pins: labels built from previewSessions only covered the top-N
+    # rows, so correctly-filed sessions rendered as "Unassigned". The map must
+    # carry EVERY owned session even when previews are cut to 1.
+    project = _project("p_app", "App", ["/www/app"])
+    resolve = _resolver({"/www/app": ("/www/app", "/www/app")})
+    sessions = [_session("/www/app", branch="main") for _ in range(5)]
+
+    tree = pt.build_tree([project], sessions, [], resolve, preview_limit=1, hydrate=False)
+
+    node = next(p for p in tree["projects"] if p["id"] == "p_app")
+    assert len(node["previewSessions"]) == 1
+    assert node["sessionCount"] == 5
+    assert {s["id"] for s in sessions} <= set(tree["session_projects"])
+    assert all(tree["session_projects"][s["id"]] == "p_app" for s in sessions)
+
+
 def test_overview_drops_session_rows_but_keeps_counts_and_previews():
     resolve = _resolver({"/repo": ("/repo", "/repo")})
     sessions = [_session("/repo", branch="main") for _ in range(4)]

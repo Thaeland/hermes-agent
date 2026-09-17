@@ -313,8 +313,10 @@ def _discover_repos_payload(
     return out
 
 
-# Not user conversations; subagent/compression children are dropped by include_children=False.
-_PROJECT_TREE_EXCLUDED_SOURCES = ["cron", "kanban"]
+# Kanban worker runs are not user conversations; subagent/compression children are dropped by
+# include_children=False. Cron runs ARE shown so jobs with a configured workdir appear under
+# their project (the scheduler persists the workdir as the session cwd at finalization).
+_PROJECT_TREE_EXCLUDED_SOURCES = ["kanban"]
 
 
 def _project_tree_row(r: dict) -> dict:

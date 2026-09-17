@@ -284,6 +284,10 @@ class ProjectsTreeResult(Result):
     projects: list[ProjectTreeNode]
     active_id: str | None = None
     scoped_session_ids: list[str] = Field(default_factory=list)
+    # Full placement map: session id -> owning project node id (Home bucket is
+    # ``__no_project__``). Every id in scoped_session_ids appears here; the
+    # value says WHICH project claimed it, so labels don't ride the preview window.
+    session_projects: dict[str, str] = Field(default_factory=dict)
 
 
 method("projects.tree", params=ProjectsTreeParams, result=ProjectsTreeResult,

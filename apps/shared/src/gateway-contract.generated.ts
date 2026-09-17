@@ -2058,6 +2058,7 @@ export interface ProjectsTreeResult {
   projects: ProjectTreeNode[]
   active_id?: string | null
   scoped_session_ids?: string[]
+  session_projects?: Record<string, string>
 }
 /** ``project_tree._project_node`` — explicit, auto (git root) or the synthetic Home bucket. */
 export interface ProjectTreeNode {

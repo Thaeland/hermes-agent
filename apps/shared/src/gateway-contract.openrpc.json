@@ -22507,6 +22507,13 @@
             },
             "title": "Scoped Session Ids",
             "type": "array"
+          },
+          "session_projects": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Session Projects",
+            "type": "object"
           }
         },
         "required": [

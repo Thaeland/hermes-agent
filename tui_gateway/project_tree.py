@@ -414,6 +414,10 @@ def build_tree(
         (by_project.setdefault(owner["id"], []) if owner else unowned).append(session)
 
     scoped_ids: list[str] = []
+    # Full placement map: session id -> owning project node id (``NO_PROJECT_ID``
+    # for the Home bucket). ``scoped_session_ids`` only says "claimed"; this says
+    # BY WHOM, so label consumers don't have to guess from the preview window.
+    session_projects: dict[str, str] = {}
     result: list[dict] = []
 
     def _previews(project_sessions: list[dict]) -> list[dict]:
@@ -421,12 +425,16 @@ def build_tree(
             return []
         return sorted(project_sessions, key=_session_time, reverse=True)[:preview_limit]
 
-    def _scope(project_sessions: list[dict]) -> None:
-        scoped_ids.extend(s["id"] for s in project_sessions if s.get("id"))
+    def _scope(project_id: str, project_sessions: list[dict]) -> None:
+        for s in project_sessions:
+            sid = s.get("id")
+            if sid:
+                scoped_ids.append(sid)
+                session_projects[sid] = project_id
     # Tier 1: explicit, user-created projects (always shown, even with 0 sessions).
     for project in active_projects:
         psessions = by_project.get(project["id"], [])
-        _scope(psessions)
+        _scope(project["id"], psessions)
         repos = _build_repos(psessions, resolve, hydrate)
         repos = _seed_folder_repos(repos, project.get("folders") or [], resolve)
         result.append(_project_node(
@@ -447,7 +455,7 @@ def build_tree(
             homeless.extend(auto_sessions)
             continue
         seen.add(auto_key)
-        _scope(auto_sessions)
+        _scope(auto_root, auto_sessions)
         result.append(_project_node(
             auto_root, base_name(auto_root) or auto_root, auto_root, repos,
             repo_node["sessionCount"], _last_active(auto_sessions), _previews(auto_sessions),
@@ -475,7 +483,7 @@ def build_tree(
     # Tier 0: whatever the tiers above could not place. Leads the list; omitted when empty.
     if homeless:
         homeless.sort(key=_session_time, reverse=True)
-        _scope(homeless)
+        _scope(NO_PROJECT_ID, homeless)
         result.insert(0, _home_project(homeless, hydrate, _previews(homeless)))
 
-    return {"projects": result, "scoped_session_ids": scoped_ids}
+    return {"projects": result, "scoped_session_ids": scoped_ids, "session_projects": session_projects}
