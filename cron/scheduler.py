@@ -1863,14 +1863,6 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
             if _agent_session_id:
                 _final_cron_session_id = _agent_session_id
         logger.debug("Job '%s': failed to resolve cron compression tip: %s", job_id, e)
-    # Persist the job's workdir as the session cwd so the Projects sidebar groups cron runs
-    # under their project (project_tree matches sessions by cwd). Fail-open: a cwd write
-    # failure must not block finalization.
-    if workdir:
-        try:
-            _session_db.update_session_cwd(_final_cron_session_id, workdir)
-        except (Exception, KeyboardInterrupt) as e:
-            logger.debug("Job '%s': failed to persist cron session cwd %s: %s", job_id, workdir, e)
     # Title must persist BEFORE end_session()/close(). Run-time suffix keeps it unique against the
     # sessions.title index; the fallbacks below guarantee a non-blank title.
     try:
@@ -1892,6 +1884,15 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
                     break
             except (Exception, KeyboardInterrupt):
                 continue
+    # Persist the job's workdir as the session cwd so the Projects sidebar groups cron runs
+    # under their project (project_tree matches sessions by cwd). Runs AFTER the title write:
+    # the bounded DB proxy disables itself on a cleanup-timeout, and a cosmetic cwd write must
+    # not consume the budget ahead of the load-bearing title. Fail-open either way.
+    if workdir:
+        try:
+            _session_db.update_session_cwd(_final_cron_session_id, workdir)
+        except (Exception, KeyboardInterrupt) as e:
+            logger.debug("Job '%s': failed to persist cron session cwd %s: %s", job_id, workdir, e)
     # Book cron_complete only when the last row is a real assistant reply ([SILENT] counts). Only a
     # POSITIVELY recognized bad status downgrades (keep tuple in sync with
     # session_lifecycle_statuses); unknown values / probe failures fail OPEN.

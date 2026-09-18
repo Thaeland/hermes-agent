@@ -82,9 +82,13 @@ def _save_log(data: dict) -> None:
 
 
 def _prev_state(row: dict) -> dict:
+    # ``hidden`` rides along because set_session_pinned(True) clears it as a
+    # side effect; an undo that restores only pinned/archived would leave a
+    # previously-hidden session unhidden.
     return {
         "pinned": int(bool(row.get("pinned"))),
         "archived": int(bool(row.get("archived"))),
+        "hidden": int(bool(row.get("hidden"))),
     }
 
 
@@ -98,7 +102,10 @@ def _batch_mutate(rid, params, column: str, value: bool) -> dict:
     if len(raw_ids) > _MAX_SESSIONS_PER_BATCH:
         return _err(rid, _E_ORG_ARG,
                     f"at most {_MAX_SESSIONS_PER_BATCH} sessions per batch")
-    with _profile_db(params) as db:
+    # writer=True: a foreign profile's DB opens read-only by default; batch
+    # mutation against a secondary profile (the desktop app-global mode the
+    # ``profile`` param exists for) must hold a write handle.
+    with _profile_db(params, writer=True) as db:
         if db is None:
             return _db_unavailable_error(rid, code=_E_ORG)
         changes, applied, failed = [], [], []
@@ -176,18 +183,22 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Reverse one batch (by ``batch_id``, or the newest not-yet-undone)."""
     wanted = str(params.get("batch_id") or "").strip()
-    with _profile_db(params) as db:
+    with _profile_db(params, writer=True) as db:
         if db is None:
             return _db_unavailable_error(rid, code=_E_ORG)
         with _LOCK:
             log = _load_log()
+            # Already-undone batches are never candidates: re-applying a stale
+            # prev snapshot would clobber deliberate changes made after the
+            # first undo.
             candidates = [
                 b for b in log["batches"]
-                if (b.get("id") == wanted if wanted else not b.get("undone"))
+                if not b.get("undone")
+                and (b.get("id") == wanted if wanted else True)
             ]
             if not candidates:
                 return _err(rid, _E_NOT_FOUND,
-                           "no such batch" if wanted else "nothing to undo")
+                           "no such batch (or already undone)" if wanted else "nothing to undo")
             batch = candidates[-1]
             restored, failed = [], []
             for change in batch.get("changes", []):
@@ -200,10 +211,16 @@ def _(rid, params: dict) -> dict:
                         continue
                     db.set_session_pinned(key, bool(prev.get("pinned")))
                     db.set_session_archived(key, bool(prev.get("archived")))
+                    if "hidden" in prev:
+                        db.set_session_hidden(key, bool(prev.get("hidden")))
                     restored.append(key)
                 except Exception as exc:
                     failed.append({"session_id": sid, "error": str(exc)})
-            batch["undone"] = True
+            # Only a fully-restored batch retires. A partial undo stays
+            # retryable — marking it done would strand the failed sessions
+            # with no path back through the undo surface.
+            if not failed:
+                batch["undone"] = True
             _save_log(log)
         return _ok(rid, {
             "batch_id": batch.get("id"),

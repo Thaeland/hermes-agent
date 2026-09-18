@@ -14,6 +14,8 @@ Decision ladder (roadmap Phase 2, tiers 1-2 only — no LLM here):
 
 from __future__ import annotations
 
+import os
+
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -40,6 +42,7 @@ def _contract_or_err(rid):
 
 
 @_registry.method("filing.status")
+@_registry.profile_scoped
 def _(rid, params: dict) -> dict:
     from tui_gateway import filing_bridge
     available = _filing_available()
@@ -55,6 +58,7 @@ def _(rid, params: dict) -> dict:
 
 
 @_registry.method("filing.rules")
+@_registry.profile_scoped
 def _(rid, params: dict) -> dict:
     contract, err = _contract_or_err(rid)
     if err:
@@ -77,19 +81,24 @@ def _suggestion_input(db):
 
 
 @_registry.method("filing.suggest")
+@_registry.profile_scoped
 def _(rid, params: dict) -> dict:
     from tui_gateway import filing_bridge
     contract, err = _contract_or_err(rid)
     if err:
         return err
     pfc = filing_bridge.load_contract_lib()
+    if pfc is None:
+        return _err(rid, _E_FILING, "filing contract library not installed")
     try:
         from hermes_cli import projects_db as pdb
     except Exception:
         return _err(rid, _E_FILING, "projects database unavailable")
     suggestions = []
-    with pdb.connect_closing() as conn:
-        for row in _suggestion_input(_get_db()):
+    with pdb.connect_closing() as conn, _profile_db(params) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=_E_FILING)
+        for row in _suggestion_input(db):
             cwd = row["cwd"]
             if pfc.is_excluded(cwd, data=contract):
                 continue
@@ -102,12 +111,17 @@ def _(rid, params: dict) -> dict:
                 if proj is not None and (current is None or proj.id != current.id):
                     suggestions.append(_suggestion(row, proj, "contract_rule", 1.0))
                 continue
-            if current is not None:
+            # A project-scoped exclusion ("never file X under Y") must veto the
+            # cwd_match for Y specifically; is_excluded(cwd) alone only trips on
+            # bare exclusions, so check the owning project by name too.
+            if current is not None and not pfc.is_excluded(
+                    cwd, project=current.name, data=contract):
                 suggestions.append(_suggestion(row, current, "cwd_match", 0.95))
     return _ok(rid, {"suggestions": suggestions})
 
 
 @_registry.method("filing.apply")
+@_registry.profile_scoped
 def _(rid, params: dict) -> dict:
     from tui_gateway import filing_bridge
     pfc = filing_bridge.load_contract_lib()
@@ -117,16 +131,27 @@ def _(rid, params: dict) -> dict:
     project = str(params.get("project") or "").strip()
     if not path or not project:
         return _err(rid, _E_FILING_ARG, "path and project are required")
+    # The contract is durable policy the live hook acts on: refuse paths that
+    # aren't absolute rather than recording a rule nothing can honour.
+    if not os.path.isabs(os.path.expanduser(path)):
+        return _err(rid, _E_FILING_ARG, "path must be absolute")
     source = str(params.get("source") or "rpc:apply")
+    # Mirror into projects.db FIRST. If the mirror fails (e.g. the folder is
+    # owned by a different project), the contract rule is never recorded —
+    # the alternative order left durable policy contradicting projects.db
+    # with no rollback.
+    mirror = _mirror_to_projects_db(path, project)
+    if mirror.startswith("projects.db apply failed"):
+        return _err(rid, _E_FILING, f"rule not recorded: {mirror}")
     with pfc._LOCK:
         data = pfc.load_contract(filing_bridge.contract_path())
         data, note = pfc.add_rule(path, project, source=source, data=data)
         pfc.save_contract(data, filing_bridge.contract_path())
-    mirror = _mirror_to_projects_db(path, project)
     return _ok(rid, {"applied": True, "note": note, "db": mirror})
 
 
 @_registry.method("filing.reject")
+@_registry.profile_scoped
 def _(rid, params: dict) -> dict:
     from tui_gateway import filing_bridge
     pfc = filing_bridge.load_contract_lib()
@@ -136,6 +161,8 @@ def _(rid, params: dict) -> dict:
     project = str(params.get("project") or "").strip() or None
     if not path:
         return _err(rid, _E_FILING_ARG, "path is required")
+    if not os.path.isabs(os.path.expanduser(path)):
+        return _err(rid, _E_FILING_ARG, "path must be absolute")
     source = str(params.get("source") or "rpc:reject")
     with pfc._LOCK:
         data = pfc.load_contract(filing_bridge.contract_path())
@@ -180,7 +207,10 @@ def _suggestion(row: dict, project, reason: str, confidence: float) -> dict:
 
 
 def _mirror_to_projects_db(path: str, project: str) -> str:
-    """Create-or-add-folder for an applied rule (same shape as the hook)."""
+    """Create-or-add-folder for an applied rule (same shape as the hook).
+
+    Runs BEFORE the contract write; a failure here aborts the apply, so the
+    returned failure prefix is a control signal, not just prose."""
     try:
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as conn:
@@ -191,7 +221,7 @@ def _mirror_to_projects_db(path: str, project: str) -> str:
             pdb.add_folder(conn, proj.id, path)
             return f"filed {path} under '{proj.name}'"
     except Exception as exc:
-        return f"contract recorded; projects.db apply failed: {exc}"
+        return f"projects.db apply failed: {exc}"
 
 
 def _retroactive_unfile(path: str, project) -> str:
@@ -212,14 +242,19 @@ def _retroactive_unfile(path: str, project) -> str:
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as conn:
             proj = _project_by_name(pdb, conn, project)
-            if proj is not None and any(
-                    path == f.path or path.startswith(f.path.rstrip("/") + "/")
-                    for f in proj.folders):
-                pdb.remove_folder(conn, proj.id, path)
-                return f"removed {path} from '{proj.name}'"
+            if proj is None:
+                return ""
+            # Only an EXACT folder mapping is removable here. When the rejected
+            # path merely sits inside a project folder, dropping that folder
+            # would un-file every other session under it — that surgical
+            # per-path unfile is the hook's job, not this fallback's.
+            for f in proj.folders:
+                if os.path.normpath(f.path) == os.path.normpath(path):
+                    pdb.remove_folder(conn, proj.id, f.path)
+                    return f"removed {path} from '{proj.name}'"
+            return f"{path} is inside a folder of '{proj.name}'; hook required to unfile"
     except Exception as exc:
         return f"retroactive unfile failed: {exc}"
-    return ""
 
 
 def register(server) -> None:

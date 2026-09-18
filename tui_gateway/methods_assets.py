@@ -9,8 +9,10 @@ server state so every device sees the same thing:
 * ``media`` — files a session delivered via a ``MEDIA:`` tag (the same
   extension-anchored matcher the messaging gateway dispatches with), resolved
   against the live filesystem;
-* ``artifact`` — generated files inside a session's working directory that
-  no MEDIA tag named (surfaced by directory scan of project folders).
+* ``artifact`` — a delivered or uploaded file that is not media (documents,
+  archives, code): the non-media bucket of the two sources above. There is no
+  directory scan of project folders — every row traces to a real upload or
+  a real MEDIA delivery.
 
 Project grouping mirrors filing semantics: an asset belongs to the project
 that owns its path (``projects_db.project_for_path``), falling back to the
@@ -151,7 +153,8 @@ def _media_rows(db, project_lookup) -> list[dict]:
         msg_rows = db._read_rows(
             "SELECT m.session_id, m.content, m.timestamp, s.title, s.cwd "
             "FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE m.role = 'assistant' AND m.active = 1 AND m.content LIKE '%MEDIA:%' "
+            "WHERE m.role = 'assistant' AND m.active = 1 AND m._compressed_summary = 0 "
+            "AND m.content LIKE '%MEDIA:%' "
             "ORDER BY m.timestamp DESC LIMIT ?",
             (_MAX_ROWS * 2,))
     except Exception:
