@@ -4,8 +4,20 @@ Hermes Agent CLI launcher.
 
 This wrapper should behave like the installed `hermes` command, including
 subcommands such as `gateway`, `cron`, and `doctor`.
+
+`env python3` may be a system interpreter with none of Hermes' dependencies
+(e.g. dotenv). If a sibling venv exists next to this script, re-exec with
+its interpreter so the launcher works from any PATH position.
 """
 
+import os
+import sys
+
 if __name__ == "__main__":
+    _here = os.path.dirname(os.path.realpath(__file__))
+    for _venv in ("venv", ".venv"):
+        _py = os.path.join(_here, _venv, "bin", "python")
+        if os.path.isfile(_py) and os.path.realpath(sys.executable) != os.path.realpath(_py):
+            os.execv(_py, [_py, os.path.realpath(__file__)] + sys.argv[1:])
     from hermes_cli.main import main
     main()
