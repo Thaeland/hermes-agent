@@ -102,3 +102,22 @@ def test_project_grouping(assets_env):
     names = {r["name"] for r in result["assets"]}
     assert "report.pdf" in names  # lives under the project's primary path
     assert "photo.jpg" not in names  # outside the project
+
+
+def test_upload_attributed_via_owning_session_cwd(assets_env):
+    """A staged upload belongs to the project that owns the UPLOADING session's
+    cwd — the flat attachments dir never falls under a project folder itself."""
+    from hermes_state import SessionDB  # noqa: F401  (fixture already built db)
+    db = assets_env["db"]
+    db.create_session("s-upload", "tui", cwd=str(assets_env["workdir"]))
+    db.append_message(
+        "s-upload", "user",
+        "look at this\n\n@file:%s\n\n--- Attached Context ---" % assets_env["upload"])
+
+    result = _ok("assets.list", {"project_id": assets_env["project_id"]})
+    by_name = {r["name"]: r for r in result["assets"]}
+    assert "photo.jpg" in by_name, result["assets"]
+    assert by_name["photo.jpg"]["session_id"] == "s-upload"
+    # An @file: ref outside the attachments root must not hijack any row.
+    assert all(r["path"].endswith("photo.jpg") for r in result["assets"]
+               if r["name"] == "photo.jpg")

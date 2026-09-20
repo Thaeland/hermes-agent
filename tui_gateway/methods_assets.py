@@ -177,11 +177,53 @@ def _media_rows(db, project_lookup) -> list[dict]:
     return rows
 
 
-def _attachment_rows(project_lookup) -> list[dict]:
-    """User uploads staged under <profile home>/attachments/, newest first."""
+_UPLOAD_REF_RE = re.compile(r'@file:(/[^\s"\'`)\]]+)')
+
+
+def _upload_session_map(db, attachments_root: str) -> dict[str, tuple[str, str, str]]:
+    """Staged upload path -> (session_id, title, cwd) from user messages' @file: refs.
+
+    Uploads are staged flat under <profile home>/attachments/, so the staged
+    path itself never falls under a project folder. The owning session is the
+    only durable link: every attach lands as an ``@file:<staged path>`` ref in
+    the user message, and the session row carries the cwd that gives project
+    membership (same cwd-fallback the MEDIA rows use).
+    """
+    mapping: dict[str, tuple[str, str, str]] = {}
+    try:
+        msg_rows = db._read_rows(
+            "SELECT m.session_id, m.content, s.title, s.cwd "
+            "FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE m.role = 'user' AND m.active = 1 AND m.content LIKE '%@file:%' "
+            "ORDER BY m.timestamp DESC LIMIT ?",
+            (_MAX_ROWS * 2,))
+    except Exception:
+        return mapping
+    root = os.path.abspath(attachments_root)
+    for r in msg_rows:
+        for raw in _UPLOAD_REF_RE.findall(str(r["content"] or "")):
+            # Echoed "Context Warnings" footers trail the ref with ':' — strip
+            # so the key matches the staged file exactly.
+            path = os.path.abspath(os.path.expanduser(raw.rstrip(":")))
+            if path.startswith(root + os.sep) and path not in mapping:
+                mapping[path] = (str(r["session_id"]),
+                                str(r["title"] or ""),
+                                str(r["cwd"] or ""))
+    return mapping
+
+
+def _attachment_rows(project_lookup, upload_map: dict[str, tuple[str, str, str]] | None = None) -> list[dict]:
+    """User uploads staged under <profile home>/attachments/, newest first.
+
+    Project attribution: the staged path first (covers attachments that
+    happen to live under a project folder), then the owning session's cwd
+    via the @file: ref map — the flat attachments dir is never under a
+    project, so without the session fallback every upload is project-less.
+    """
     root = _attachments_root()
     if not root.is_dir():
         return []
+    upload_map = upload_map or {}
     rows: list[dict] = []
     try:
         entries = sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -190,11 +232,13 @@ def _attachment_rows(project_lookup) -> list[dict]:
     for p in entries[:_MAX_SCAN_FILES]:
         if not p.is_file():
             continue
-        proj = project_lookup(str(p))
-        row = _row(str(p),
+        apath = os.path.abspath(str(p))
+        sid, title, cwd = upload_map.get(apath, ("", "", ""))
+        proj = project_lookup(apath) or (project_lookup(cwd) if cwd else None)
+        row = _row(apath,
                    kind="attachment",
-                   session_id="",
-                   session_title="",
+                   session_id=sid,
+                   session_title=title,
                    project_id=proj[0] if proj else None,
                    project_name=proj[1] if proj else None)
         if row:
@@ -232,7 +276,8 @@ def _(rid, params: dict) -> dict:
         with ctx:
             rows = _media_rows(db, lookup)
             if kind in (None, "attachment"):
-                rows += _attachment_rows(lookup)
+                root = _attachments_root()
+                rows += _attachment_rows(lookup, _upload_session_map(db, str(root)))
     if kind:
         rows = [r for r in rows if r["kind"] == kind]
     if project_id:
