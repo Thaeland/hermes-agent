@@ -647,3 +647,45 @@ async def test_composer_paste_outside_workspace_is_attached_but_sibling_dir_is_n
     assert "PASTED-BODY-MARKER" in result.message
     assert "LOOKALIKE-SECRET" not in result.message
     assert "outside the allowed workspace" in "\n".join(result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_extra_allowed_roots_admit_staged_attachments_but_not_other_paths(tmp_path: Path, monkeypatch):
+    """file.attach stages uploads into <profile_home>/attachments, outside the session cwd;
+    the turn widens the allow-check with that staged dir so gateway-minted @file: refs
+    resolve, while unrelated outside paths stay rejected and the credential deny-list
+    still runs inside the widened root."""
+    from agent.context_references import preprocess_context_references
+
+    home = tmp_path / ".hermes"
+    staged = home / "attachments" / "note.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("STAGED-ATTACHMENT-BODY\n", encoding="utf-8")
+    stray = tmp_path / "elsewhere" / "secret.txt"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("STRAY-BODY\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+
+    result = preprocess_context_references(
+        f"look at @file:{staged}", cwd=cwd, allowed_root=cwd, context_length=100_000,
+        extra_allowed_roots=[staged.parent])
+    assert "STAGED-ATTACHMENT-BODY" in result.message
+    assert not result.warnings
+
+    blocked = preprocess_context_references(
+        f"look at @file:{stray}", cwd=cwd, allowed_root=cwd, context_length=100_000,
+        extra_allowed_roots=[staged.parent])
+    assert "STRAY-BODY" not in blocked.message
+    assert any("outside the allowed workspace" in w for w in blocked.warnings)
+
+    # Widening does NOT bypass the credential deny-list: .env under the widened root stays blocked.
+    env_file = staged.parent / ".env"
+    env_file.write_text("TOKEN=***\n", encoding="utf-8")
+    denied = preprocess_context_references(
+        f"look at @file:{env_file}", cwd=cwd, allowed_root=cwd, context_length=100_000,
+        extra_allowed_roots=[staged.parent])
+    assert "supersecret" not in denied.message
+    assert any("sensitive" in w for w in denied.warnings)
