@@ -73,7 +73,8 @@ def load_filing_hook_lib() -> Optional[Any]:
         return sys.modules["hermes_filing_hook"]
     except KeyError:
         pass
-    hook_file = Path(os.path.expanduser("~")) / ".hermes" / "hooks" / "project-filing" / "handler.py"
+    from hermes_constants import get_hermes_home
+    hook_file = get_hermes_home() / "hooks" / "project-filing" / "handler.py"
     if not hook_file.is_file():
         return None
     try:
@@ -91,7 +92,8 @@ def load_filing_hook_lib() -> Optional[Any]:
 
 def hook_installed() -> bool:
     """True when the project-filing gateway hook is present and declares events."""
-    hook_dir = Path(os.path.expanduser("~")) / ".hermes" / "hooks" / "project-filing"
+    from hermes_constants import get_hermes_home
+    hook_dir = get_hermes_home() / "hooks" / "project-filing"
     manifest = hook_dir / "HOOK.yaml"
     if not (hook_dir / "handler.py").is_file() or not manifest.is_file():
         return False
